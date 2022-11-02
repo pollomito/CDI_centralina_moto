@@ -1,0 +1,283 @@
+;***************************************************************************
+;******
+;****** Digital ignition for 2 stroke engines. SPORTDEVICES 1/9/2005
+;******
+;******
+;****** Digital parts: PIC16F84
+;******
+;******
+;****************************************************************************
+
+	list     p=16F84a
+	#include p16F84a.inc
+	radix dec
+
+	__CONFIG	_WDT_OFF & _XT_OSC
+
+;setup values
+#define prescaler	7
+#define scr_pulse	200   ;us for pulse, it DOESN'T change spark duration
+#define min_period	31
+#define max_period	60000000/128/min_rpm
+#define pickup		PORTB,0  ;pin 6
+#define inhibit		PORTB,1
+#define output		PORTA,2  ;pin 1
+#define LED			PORTA,4  ;pin 1
+
+#define TMR0	1
+
+;please note previous version was: "cblock 8", then the first 4 variables overwrote 
+;the last 4 Special Function Registers of the PIC, and the program didn't work
+	cblock 0x0c ;first free memory address!!!
+	tmr0h,perl,perh,first,del
+	endc
+
+	org 0x00
+	GOTO   MAIN
+
+;counter high bits
+	org 0x04
+  	INCF tmr0h,f
+  	BCF INTCON,2
+  	retfie
+
+#define sizeof_ignition 57
+read_array:
+;	movlw ignition
+	addwf  PCL,f
+
+ignition:
+	retlw 88
+	retlw 91
+	retlw 93
+	retlw 96
+	retlw 99
+	retlw 102
+	retlw 105
+	retlw 108
+	retlw 110
+	retlw 113
+	retlw 116
+	retlw 119
+	retlw 122
+	retlw 125
+	retlw 128
+	retlw 130
+	retlw 133
+	retlw 139
+	retlw 142
+	retlw 145
+	retlw 147
+	retlw 150
+	retlw 153
+	retlw 156
+	retlw 159
+	retlw 162
+	retlw 164
+	retlw 167
+	retlw 170
+	retlw 173
+	retlw 176
+	retlw 179
+	retlw 182
+	retlw 184
+	retlw 187
+	retlw 190
+	retlw 193
+	retlw 196
+	retlw 199
+	retlw 201
+	retlw 204
+	retlw 207
+	retlw 210
+	retlw 213
+	retlw 216
+	retlw 219
+	retlw 221
+	retlw 224
+	retlw 227
+	retlw 230
+	retlw 236
+	retlw 238
+	retlw 241
+	retlw 244
+	retlw 247
+	retlw 250
+	retlw 253
+
+
+wait_pulse: ;active on falling
+
+; while (!input(pikcup));  //wait line goes high
+waithigh:
+    BTFSS  pickup
+	GOTO   waithigh
+
+; while (input(pickup));   //wait line goes low
+waitlow:  
+	BTFSC  pickup
+	GOTO   waitlow
+
+;perl=tmr0l; perh=tmr0h;
+islow:  
+	MOVF   TMR0,W
+	MOVWF  perl
+	MOVF   tmr0h,W
+	MOVWF  perh
+
+;TMR0=0; tmr0l=0; tmr0h=0;
+	CLRF   TMR0
+	CLRF   tmr0h
+
+	retlw  0
+;}
+
+;****************
+MAIN: 
+	BSF    STATUS,5
+; set_tris_b(0x01); //PIN B0 input (hall_sensor)
+	MOVLW  01
+	MOVWF  TRISB ;B0: pickup input
+    MOVLW 0
+	MOVWF  TRISA ;A2: output
+
+	MOVLW  prescaler-1	;2^prescaler=128
+	MOVWF  OPTION_REG
+	BCF    STATUS,5
+	BSF    first,0      ; first=true;
+    CLRF   tmr0h
+
+    MOVLW  0xA0 ;INTCON=0xa0; //T0IE=1
+    MOVWF  INTCON
+
+
+	BCF    output ; output_low(output); //active high
+
+;****************
+main_loop:  
+	CALL	wait_pulse
+
+; first pulse is not processed because the period can not be calculated until the second pulse
+; if(first)  { wait_pulse(); first=false; }
+
+	BTFSS  first,0
+	GOTO   nowait
+
+	CALL	wait_pulse
+	BCF    first,0 		; first=false
+
+;if (!perh && (perl>=min_period)&&(perl<min_period+sizeof(ignition0)))
+; inside the map?
+nowait:
+	MOVF   perh,F
+	BTFSS  STATUS,2
+    GOTO   out_map
+	MOVLW  min_period
+	SUBWF  perl,W
+	BTFSS  STATUS,0
+	GOTO   out_map
+	MOVLW  min_period+sizeof_ignition
+	SUBWF  perl,W
+	BTFSC  STATUS,0
+	GOTO   out_map
+
+; TABLE RANGE: (5000 < RPM < 15000)
+;**********************************
+	MOVLW  min_period ; perl=perl-min_period;
+	SUBWF  perl,W
+
+; del=ignition0[perl];
+	CALL   read_array
+	MOVWF  del
+
+	MOVLW  9	;del-=9; //compensation for internal delay (24 us)
+	SUBWF  del,F
+
+    BCF	   LED
+;do delay
+loop1:	
+;delay_multiple	6
+    nop
+    nop
+    nop
+	DECFSZ del,F
+	GOTO   loop1
+    BSF	   LED
+	GOTO   DO_PULSE
+;*****
+
+;if (perh || (perl>=min_period+sizeof(ignition0)))
+out_map:
+	MOVF   perh,F
+	BTFSS  STATUS,2
+	GOTO   LOW_RPM
+	MOVLW  min_period+sizeof_ignition
+	SUBWF  perl,W
+	BTFSS  STATUS,0
+;	GOTO   HIGH_RPM (disabled)
+    GOTO   silent
+
+;LOW RPM RANGE (<5000)
+;*********************
+LOW_RPM:
+	INCF   perh,F  		;perh++
+	INCF   perl,F		;perl++
+    BCF	   LED
+loop2:
+;low_rpm_multiple=20
+    MOVLW (20-5)/3
+    MOVWF del
+loop3:
+	DECFSZ del,F
+	GOTO   loop3
+;
+
+	DECFSZ perl,F
+	GOTO   loop2
+	DECFSZ perh,F
+	GOTO   loop2
+    BSF	   LED
+	GOTO   DO_PULSE
+
+;HIGH RPM RANGE (>15000) (disabled)
+;***********************
+HIGH_RPM:
+	INCF   perl,F		;perl++;
+    BCF	   LED
+loop4:  
+;high_rpm_multiple	10 us //0 degrees
+	MOVLW  2
+	MOVWF  del
+loop5:
+	DECFSZ del,F
+	GOTO   loop5
+;**
+	DECFSZ perl,F
+    BSF	   LED
+	GOTO   loop4
+;*******
+
+
+DO_PULSE:
+	BSF    inhibit   ;switch OFF DC/DC oscillator (if present)
+
+	BSF    output	;output_high(output);
+	MOVLW  scr_pulse/3
+	MOVWF  del
+loop9:
+	DECFSZ del,F
+	GOTO   loop9
+	BCF    output	;output_low(output);
+
+;silent_time, 768 us (256*3)
+silent: 
+    CLRF   del
+loop10:
+	DECFSZ del,F
+	GOTO   loop10
+
+	BCF    inhibit   ;switch ON DC/DC oscillator (if present)
+
+	GOTO   main_loop
+
+	END
